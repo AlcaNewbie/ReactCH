@@ -3,11 +3,11 @@ import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
 import './index.css'
 
-// === ANTI F12 / DEVTOOLS (Debugger Stop) ===
+// === ANTI DEVTOOLS (akurat, tanpa false positive) ===
 ;(function antiDevtools() {
-  const threshold = 160;
+  let triggered = false;
 
-  // 1. Block context menu & shortcuts
+  // 1. Blokir shortcut & context menu (aman, tidak false positive)
   document.addEventListener('contextmenu', (e) => e.preventDefault());
   document.addEventListener('keydown', (e) => {
     const k = e.key;
@@ -23,40 +23,56 @@ import './index.css'
     }
   });
 
-  // 2. Debugger loop (freeze tab saat devtools terbuka)
-  function freeze() {
-    try {
-      // eslint-disable-next-line no-debugger
-      debugger;
-    } catch {}
-    setTimeout(freeze, 50);
-  }
-
-  // 3. Size-based detection (desktop docked devtools)
-  function checkSize() {
-    const w = window.outerWidth - window.innerWidth;
-    const h = window.outerHeight - window.innerHeight;
-    if (w > threshold || h > threshold) {
-      // Trigger debugger storm
-      freeze();
-      document.body.innerHTML =
-        '<div style="display:flex;height:100vh;align-items:center;justify-content:center;font-family:sans-serif;background:#000;color:#fff">DevTools terdeteksi. Tutup DevTools untuk melanjutkan.</div>';
-    }
-  }
-  setInterval(checkSize, 800);
-
-  // 4. Mobile detection (debugger trap)
-  let start = Date.now();
-  setInterval(() => {
-    const t = Date.now();
+  // 2. Debugger trap — deteksi DevTools via timing
+  //    Cara kerja: jalankan `debugger` lalu ukur waktu eksekusi.
+  //    Jika DevTools terbuka & paused, waktu akan jauh lebih lama.
+  function detect() {
+    const t0 = performance.now();
     // eslint-disable-next-line no-debugger
     debugger;
-    if (Date.now() - t > 100) {
-      // DevTools open
-      setTimeout(freeze, 10);
+    const elapsed = performance.now() - t0;
+
+    // DevTools terbuka & break aktif → elapsed > 100ms
+    if (elapsed > 100) {
+      triggered = true;
+      onDetected();
+      return;
     }
-    start = t;
-  }, 1000);
+    if (!triggered) setTimeout(detect, 1200);
+  }
+
+  // 3. Deteksi ukuran — HANYA trigger kalau selisih sangat besar
+  //    (DevTools docked besar), bukan scrollbar / zoom / mobile normal
+  function checkSize() {
+    if (triggered) return;
+    const wDiff = window.outerWidth - window.innerWidth;
+    const hDiff = window.outerHeight - window.innerHeight;
+    // Threshold 300 = sangat yakin DevTools docked besar, bukan hal normal
+    if (wDiff > 300 || hDiff > 300) {
+      triggered = true;
+      onDetected();
+    }
+  }
+
+  function onDetected() {
+    if (document.body.dataset.dtBlocked === '1') return;
+    document.body.dataset.dtBlocked = '1';
+    document.body.innerHTML = `
+      <div style="display:flex;height:100vh;align-items:center;justify-content:center;
+                  font-family:system-ui,sans-serif;background:#0a0a0a;color:#f5f5f5;
+                  text-align:center;padding:24px">
+        <div>
+          <h2 style="font-size:20px;margin-bottom:8px">Akses ditolak</h2>
+          <p style="color:#888;font-size:14px">Tutup DevTools lalu refresh halaman.</p>
+        </div>
+      </div>`;
+  }
+
+  // Mulai deteksi setelah halaman stabil
+  window.addEventListener('load', () => {
+    setTimeout(detect, 500);
+    setInterval(checkSize, 1500);
+  });
 })();
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
