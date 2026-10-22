@@ -24,8 +24,14 @@ const DEFAULT_VIP_KEYS = [
   { name: 'VIP-H9PQGDBA', apiKey: '5XJr5CoEvcwn6Akmx4TvQPV+ybnaa7VAn8OUYdociEXLS2l06kPypNMFhz5eMExSxrq+/mHz8sOu/5k44dEB016L/QJ3QZpPuYbDiSdpxlVTOR6a14P295M8lQrmMrj0YLJmmne1sQ+1YGhCKSg=', domain: 'https://anzzmodsofficial.edgeone.dev/reaction/wa' }
 ];
 
-// In-memory state (per-instance; Vercel serverless)
-let state = { keyIndex: 0, keys: [...DEFAULT_VIP_KEYS], lastSync: 0 };
+// In-memory state (per serverless instance)
+let state = {
+  keyIndex: 0,
+  keys: [...DEFAULT_VIP_KEYS],
+  lastSync: 0
+};
+
+/* -------------------- Helpers -------------------- */
 
 function normalizeUrl(input) {
   const m = String(input || '').match(LINK_REGEX);
@@ -37,32 +43,101 @@ function parseEmojis(input) {
   return matches && matches.length ? matches.slice(0, 5).join(', ') : null;
 }
 
+async function generateVipApiKey(vipKeyName, targetDomain) {
+  const cred = VIP_CREDENTIALS[vipKeyName];
+  if (!cred) return null;
+  try {
+    const res = await axios.post(
+      GEN_KEY_ENDPOINT,
+      { vipKey: vipKeyName, email: cred.email, domain: targetDomain, uid: cred.uid },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    if (res.data && res.data.success && res.data.apiKey) return res.data.apiKey;
+  } catch {}
+  return null;
+}
+
+async function syncVipKeys() {
+  try {
+    const authRes = await axios.post(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${FIREBASE_API_KEY}`,
+      { returnSecureToken: true },
+      { headers: { Referer: 'https://reactionwa.online/' }, timeout: 10000 }
+    );
+    const idToken = authRes.data && authRes.data.idToken;
+    if (!idToken) return null;
+
+    const dbRes = await axios.get(`${RTDB_URL}?auth=${idToken}`, { timeout: 10000 });
+    if (!dbRes.data || typeof dbRes.data !== 'object') return null;
+
+    const freshKeys = [];
+    for (const [name, val] of Object.entries(dbRes.data)) {
+      if (!val || val.active === false) continue;
+      let domain = val.domain || 'https://reactionwa.online';
+      let apiKey = val.apiKey;
+      if (domain === '*' || !apiKey) {
+        domain = 'https://mytestdomain.com';
+        const genKey = await generateVipApiKey(name, domain);
+        if (genKey) apiKey = genKey;
+      }
+      if (apiKey) freshKeys.push({ name, apiKey, domain });
+    }
+
+    if (freshKeys.length > 0) {
+      state.keys = freshKeys;
+      state.lastSync = Date.now();
+      return freshKeys;
+    }
+  } catch {}
+  return null;
+}
+
 async function sendReactionRequest(targetUrl, reactionText, keyObj) {
   const origin = keyObj.domain === '*' ? 'https://reactionwa.online' : keyObj.domain;
   const referer = origin.endsWith('/') ? origin : origin + '/';
-  const res = await axios.post(API_ENDPOINT, { url: targetUrl, reaction: reactionText }, {
-    headers: {
-      'Content-Type': 'application/json',
-      Origin: origin,
-      Referer: referer,
-      'x-api-key': keyObj.apiKey,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
-    },
-    timeout: 45000
-  });
-  return res.data;
+
+  const response = await axios.post(
+    API_ENDPOINT,
+    { url: targetUrl, reaction: reactionText },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: origin,
+        Referer: referer,
+        'x-api-key': keyObj.apiKey,
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+      },
+      timeout: 45000
+    }
+  );
+
+  return response.data;
 }
 
+/* -------------------- Handler -------------------- */
+
 export default async function handler(req, res) {
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ status: false, error: 'Method not allowed' });
+  if (req.method !== 'POST') {
+    return res.status(405).json({
+      Creator: 'AlcaW44',
+      Saluran: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
+      status: false,
+      error: 'Method not allowed. Gunakan POST.'
+    });
+  }
 
   const startTime = Date.now();
-  const { url, reaction } = req.body || {};
+  const body = req.body || {};
+  const url = body.url;
+  const reaction = body.reaction;
 
+  // Validasi URL
   const normalizedUrl = normalizeUrl(url);
   if (!normalizedUrl) {
     return res.json({
@@ -74,6 +149,7 @@ export default async function handler(req, res) {
     });
   }
 
+  // Validasi emoji
   const emojiString = parseEmojis(reaction);
   if (!emojiString) {
     return res.json({
@@ -85,11 +161,18 @@ export default async function handler(req, res) {
     });
   }
 
-  if (!state.keys || state.keys.length === 0) state.keys = DEFAULT_VIP_KEYS;
+  // Sync VIP keys dari Firebase (maks 1x per 5 menit per instance)
+  if (Date.now() - state.lastSync > 5 * 60 * 1000) {
+    await syncVipKeys();
+  }
+
+  if (!state.keys || state.keys.length === 0) {
+    state.keys = DEFAULT_VIP_KEYS;
+  }
 
   let attempts = 0;
-  let lastError = 'Semua VIP Key telah mencapai batas kuota harian (50/50).';
   const maxAttempts = state.keys.length;
+  let lastError = 'Semua VIP key gagal memproses request. Coba lagi beberapa saat.';
 
   while (attempts < maxAttempts) {
     const currentKey = state.keys[state.keyIndex % state.keys.length];
@@ -97,9 +180,11 @@ export default async function handler(req, res) {
 
     try {
       const result = await sendReactionRequest(normalizedUrl, emojiString, currentKey);
+
       if (result && (result.success === true || result.status === 'success')) {
         const task = (result.data && result.data.task) || {};
         const vipInfo = (result.data && result.data.vip) || {};
+
         return res.json({
           Creator: 'AlcaW44',
           Saluran: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
@@ -112,17 +197,22 @@ export default async function handler(req, res) {
             emojis: task.reaction_code || emojiString,
             vip_key: currentKey.name,
             vip_package: vipInfo.packageName || 'VIP Permanent',
-            usage_today: result.usage_today || null,
-            limit: result.limit || 50,
+            usage_today: result.usage_today ?? null,
             points_remaining: vipInfo.pointRemaining ?? null
           }
         });
       }
-      if (result && result.error) lastError = `[${currentKey.name}] ${result.error}`;
+
+      if (result && result.error) {
+        lastError = `[${currentKey.name}] ${result.error}`;
+      }
     } catch (err) {
       const errData = err.response && err.response.data;
-      lastError = errData && errData.error ? `[${currentKey.name}] ${errData.error}` : (err.message || 'Server error');
+      lastError = errData && errData.error
+        ? `[${currentKey.name}] ${errData.error}`
+        : (err.message || 'Terjadi kesalahan pada server');
     }
+
     attempts++;
   }
 
