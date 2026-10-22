@@ -8,6 +8,9 @@ const RTDB_URL = 'https://autoreactberry-default-rtdb.asia-southeast1.firebaseda
 const LINK_REGEX = /(?:https?:\/\/)?(?:www\.)?whatsapp\.com\/channel\/([A-Za-z0-9_-]+)\/(\d+)/i;
 const EMOJI_REGEX = /\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?/gu;
 
+// Reset window untuk exhausted marker (6 jam)
+const RESET_WINDOW = 6 * 60 * 60 * 1000;
+
 const VIP_CREDENTIALS = {
   'VIP-SYNOZG8C': { email: 'abovezephyrax@gmail.com', uid: 'syNOzg8C4dfMq8CwnE0inNDNdwn1' },
   'VIP-D68JICP0': { email: 'pribadiarep@gmail.com', uid: 'n6eaa7vLSWdexXeCzDnThjqxHps1' },
@@ -24,10 +27,13 @@ const DEFAULT_VIP_KEYS = [
   { name: 'VIP-H9PQGDBA', apiKey: '5XJr5CoEvcwn6Akmx4TvQPV+ybnaa7VAn8OUYdociEXLS2l06kPypNMFhz5eMExSxrq+/mHz8sOu/5k44dEB016L/QJ3QZpPuYbDiSdpxlVTOR6a14P295M8lQrmMrj0YLJmmne1sQ+1YGhCKSg=', domain: 'https://anzzmodsofficial.edgeone.dev/reaction/wa' }
 ];
 
-// In-memory state (per serverless instance)
+/* -------------------- State -------------------- */
+
+// state di memori serverless instance
+// exhaustedAt = timestamp kapan key ditandai habis, 0 = available
 let state = {
   keyIndex: 0,
-  keys: [...DEFAULT_VIP_KEYS],
+  keys: DEFAULT_VIP_KEYS.map(k => ({ ...k, exhaustedAt: 0 })),
   lastSync: 0
 };
 
@@ -41,6 +47,16 @@ function normalizeUrl(input) {
 function parseEmojis(input) {
   const matches = String(input || '').match(EMOJI_REGEX);
   return matches && matches.length ? matches.slice(0, 5).join(', ') : null;
+}
+
+// Key yang masih dalam window reset dianggap "exhausted" (skip)
+// Jika semua exhausted, tetap coba semua (siapa tahu ada yang reset lebih cepat)
+function getAvailableKeys() {
+  const now = Date.now();
+  const available = state.keys.filter(
+    k => !k.exhaustedAt || now - k.exhaustedAt > RESET_WINDOW
+  );
+  return available.length > 0 ? available : state.keys;
 }
 
 async function generateVipApiKey(vipKeyName, targetDomain) {
@@ -84,7 +100,12 @@ async function syncVipKeys() {
     }
 
     if (freshKeys.length > 0) {
-      state.keys = freshKeys;
+      // pertahankan exhaustedAt dari key yang sama (jika ada)
+      const oldMap = new Map(state.keys.map(k => [k.name, k.exhaustedAt || 0]));
+      state.keys = freshKeys.map(k => ({
+        ...k,
+        exhaustedAt: oldMap.get(k.name) || 0
+      }));
       state.lastSync = Date.now();
       return freshKeys;
     }
@@ -115,10 +136,13 @@ async function sendReactionRequest(targetUrl, reactionText, keyObj) {
   return response.data;
 }
 
+function isQuotaError(msg) {
+  return typeof msg === 'string' && /limit harian/i.test(msg);
+}
+
 /* -------------------- Handler -------------------- */
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -161,30 +185,56 @@ export default async function handler(req, res) {
     });
   }
 
-  // Sync VIP keys dari Firebase (maks 1x per 5 menit per instance)
+  // Sync key dari Firebase (maks 1x per 5 menit)
   if (Date.now() - state.lastSync > 5 * 60 * 1000) {
     await syncVipKeys();
   }
 
   if (!state.keys || state.keys.length === 0) {
-    state.keys = DEFAULT_VIP_KEYS;
+    state.keys = DEFAULT_VIP_KEYS.map(k => ({ ...k, exhaustedAt: 0 }));
+  }
+
+  // Kumpulkan key yang tersedia
+  const availableKeys = getAvailableKeys();
+
+  // Jika semua key baru ditandai exhausted dalam <1 menit,
+  // langsung kembalikan error tanpa mencoba (hemat waktu)
+  const allFreshlyExhausted = availableKeys.every(
+    k => k.exhaustedAt && Date.now() - k.exhaustedAt < 60 * 1000
+  );
+  if (allFreshlyExhausted && availableKeys.length > 0) {
+    const soonest = availableKeys.reduce(
+      (min, k) => Math.min(min, k.exhaustedAt || Infinity),
+      Infinity
+    );
+    return res.json({
+      Creator: 'AlcaW44',
+      Saluran: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
+      time: `${Date.now() - startTime}ms`,
+      status: false,
+      error: `Semua VIP key sedang kehabisan kuota. Coba lagi nanti.`,
+      next_retry_in_seconds: Math.max(
+        0,
+        Math.floor((soonest + RESET_WINDOW - Date.now()) / 1000)
+      )
+    });
   }
 
   let attempts = 0;
-  const maxAttempts = state.keys.length;
   let lastError = 'Semua VIP key gagal memproses request. Coba lagi beberapa saat.';
+  let quotaErrors = 0;
 
-  while (attempts < maxAttempts) {
-    const currentKey = state.keys[state.keyIndex % state.keys.length];
-    state.keyIndex = (state.keyIndex + 1) % state.keys.length;
+  while (attempts < availableKeys.length) {
+    const currentKey = availableKeys[attempts];
 
     try {
       const result = await sendReactionRequest(normalizedUrl, emojiString, currentKey);
 
       if (result && (result.success === true || result.status === 'success')) {
+        // Berhasil → clear marker
+        currentKey.exhaustedAt = 0;
         const task = (result.data && result.data.task) || {};
         const vipInfo = (result.data && result.data.vip) || {};
-
         return res.json({
           Creator: 'AlcaW44',
           Saluran: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
@@ -203,24 +253,42 @@ export default async function handler(req, res) {
         });
       }
 
-      if (result && result.error) {
-        lastError = `[${currentKey.name}] ${result.error}`;
+      const errMsg = (result && result.error) || '';
+      if (isQuotaError(errMsg)) {
+        currentKey.exhaustedAt = Date.now();
+        quotaErrors++;
+        lastError = `[${currentKey.name}] kuota habis, dilewati`;
+      } else if (errMsg) {
+        lastError = `[${currentKey.name}] ${errMsg}`;
       }
     } catch (err) {
       const errData = err.response && err.response.data;
-      lastError = errData && errData.error
-        ? `[${currentKey.name}] ${errData.error}`
-        : (err.message || 'Terjadi kesalahan pada server');
+      const errMsg = (errData && errData.error) || err.message || 'Terjadi kesalahan pada server';
+
+      if (isQuotaError(errMsg)) {
+        currentKey.exhaustedAt = Date.now();
+        quotaErrors++;
+        lastError = `[${currentKey.name}] kuota habis, dilewati`;
+      } else {
+        lastError = `[${currentKey.name}] ${errMsg}`;
+      }
     }
 
     attempts++;
   }
 
+  // Semua key gagal — beri info jika semuanya kuota habis
+  const totalQuotaExhausted = quotaErrors === availableKeys.length;
   return res.json({
     Creator: 'AlcaW44',
     Saluran: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
     time: `${Date.now() - startTime}ms`,
     status: false,
-    error: lastError
+    error: totalQuotaExhausted
+      ? `Semua ${availableKeys.length} VIP key sudah mencapai batas kuota harian. Silakan coba lagi besok.`
+      : lastError,
+    exhausted_keys: totalQuotaExhausted
+      ? availableKeys.map(k => k.name)
+      : undefined
   });
 }
