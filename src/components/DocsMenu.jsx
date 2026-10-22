@@ -1,39 +1,50 @@
-import { useEffect, useState } from 'react';
+export default function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-export default function DocsMenu() {
-  const [docs, setDocs] = useState(null);
-
-  useEffect(() => {
-    fetch('/api/docs').then(r => r.json()).then(setDocs).catch(() => {});
-  }, []);
-
-  if (!docs) return <p className="subtitle">Memuat dokumentasi...</p>;
-
-  return (
-    <>
-      <h1 className="title">Docs</h1>
-      <p className="subtitle">Dokumentasi API yang tersedia di website ini.</p>
-
-      {docs.endpoints.map((ep, i) => (
-        <div className="doc-item" key={i}>
-          <h3>{ep.name}</h3>
-          <span className="method">{ep.method} {ep.path}</span>
-          <p>{ep.description}</p>
-
-          <div className="label">Request Body</div>
-          <pre>{JSON.stringify(ep.body, null, 2)}</pre>
-
-          <div className="label">Response</div>
-          <pre>{JSON.stringify(ep.response, null, 2)}</pre>
-        </div>
-      ))}
-
-      <div className="doc-item">
-        <h3>Catatan</h3>
-        <ul style={{ paddingLeft: 20, color: '#888', fontSize: 13, lineHeight: 1.8 }}>
-          {docs.notes.map((n, i) => <li key={i}>{n}</li>)}
-        </ul>
-      </div>
-    </>
-  );
+  res.json({
+    status: true,
+    creator: 'AlcaW44',
+    channel: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
+    base_url: 'https://' + (req.headers.host || 'your-domain.vercel.app'),
+    endpoint: {
+      name: 'React',
+      method: 'POST',
+      path: '/api/react',
+      description: 'Kirim reaction ke post WhatsApp Channel',
+      body: {
+        url: 'https://whatsapp.com/channel/XXXX/YYYY',
+        reaction: '👍'
+      },
+      response_success: {
+        Creator: 'AlcaW44',
+        Saluran: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
+        time: '1234ms',
+        status: true,
+        message: 'Reaction VIP API masuk antrean.',
+        data: {
+          task_id: 'abc123',
+          target: 'https://whatsapp.com/channel/...',
+          emojis: '👍',
+          vip_key: 'VIP-XXXX',
+          vip_package: 'VIP Permanent',
+          usage_today: 5,
+          points_remaining: 100
+        }
+      },
+      response_error: {
+        Creator: 'AlcaW44',
+        Saluran: 'https://whatsapp.com/channel/0029Vb82nkLEwEjtLSQ49I44',
+        time: '800ms',
+        status: false,
+        error: 'Format URL WhatsApp Channel tidak valid.'
+      }
+    },
+    notes: [
+      'Maksimal 5 emoji per request (dipisah koma: 💦,👍)',
+      'URL harus format: https://whatsapp.com/channel/{id}/{post_id}',
+      'Bisa dipanggil dari aplikasi lain via POST request'
+    ]
+  });
 }
